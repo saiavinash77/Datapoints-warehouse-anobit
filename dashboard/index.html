@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AVC Collector</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --line:#2a3550; --txt:#dfe6f3; --dim:#8a97b0;
+          --green:#3ddc84; --red:#ff5c6c; --amber:#ffc857; --blue:#5b9dff; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--txt); font:14px/1.5 'Segoe UI',system-ui,sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 20px; background:var(--panel);
+           border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; font-weight:600; }
+  .tabs { display:flex; gap:4px; margin-left:24px; }
+  .tabs button { background:none; border:none; color:var(--dim); padding:8px 16px; cursor:pointer;
+                 font-size:14px; border-radius:6px; }
+  .tabs button.active { background:var(--line); color:var(--txt); }
+  .devbadge { margin-left:auto; display:flex; gap:10px; align-items:center; font-size:13px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--red); display:inline-block; }
+  .dot.on { background:var(--green); }
+  main { padding:20px; max-width:1200px; margin:0 auto; }
+  .page { display:none; } .page.active { display:block; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:14px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin-bottom:12px; }
+  canvas { width:100%; height:140px; display:block; background:#0b0f18; border-radius:6px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  .row > * { flex:1; min-width:260px; }
+  .meters { display:flex; gap:12px; margin-top:10px; flex-wrap:wrap; }
+  .meter { background:#0b0f18; border:1px solid var(--line); border-radius:8px; padding:8px 14px; min-width:110px; }
+  .meter .v { font-size:20px; font-weight:600; }
+  .meter .l { font-size:11px; color:var(--dim); }
+  .badge { display:inline-block; padding:3px 12px; border-radius:12px; font-size:12px; font-weight:600; }
+  .badge.good { background:#123a26; color:var(--green); }
+  .badge.warn { background:#3a3112; color:var(--amber); }
+  .badge.bad  { background:#3a1418; color:var(--red); }
+  button.act { background:var(--blue); color:#fff; border:none; padding:9px 18px; border-radius:8px;
+               cursor:pointer; font-size:14px; font-weight:600; }
+  button.act:disabled { opacity:.4; cursor:default; }
+  button.act.rec { background:var(--red); }
+  button.act.ghost { background:var(--line); color:var(--txt); }
+  input, select { background:#0b0f18; border:1px solid var(--line); color:var(--txt); padding:8px 10px;
+                  border-radius:6px; font-size:14px; }
+  label { font-size:12px; color:var(--dim); display:block; margin-bottom:4px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:6px 8px; border-bottom:1px solid var(--line); }
+  td { padding:6px 8px; border-bottom:1px solid #202a40; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .bar { height:8px; background:#0b0f18; border-radius:4px; overflow:hidden; margin-top:6px; }
+  .bar > div { height:100%; background:var(--blue); width:0%; transition:width .3s; }
+  .small { font-size:12px; color:var(--dim); }
+  a { color:var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AVC Collector</h1>
+  <nav class="tabs">
+    <button data-page="live" class="active">Live</button>
+    <button data-page="collect">Collect</button>
+    <button data-page="process">Process</button>
+    <button data-page="dataset">Dataset</button>
+  </nav>
+  <div class="devbadge"><span class="dot" id="devdot"></span><span id="devtext">device: —</span></div>
+</header>
+<main>
+
+<section class="page active" id="page-live">
+  <div class="card"><h2>Microphone (16 kHz)</h2><canvas id="cv-mic" width="1100" height="140"></canvas></div>
+  <div class="card"><h2>Piezo / vibration (8 kHz)</h2><canvas id="cv-piezo" width="1100" height="140"></canvas></div>
+  <div class="card"><h2>Signal quality</h2>
+    <div class="meters">
+      <div class="meter"><div class="v" id="m-verdict">—</div><div class="l">verdict</div></div>
+      <div class="meter"><div class="v" id="m-dbfs">—</div><div class="l">level dBFS</div></div>
+      <div class="meter"><div class="v" id="m-clip">—</div><div class="l">clipping %</div></div>
+      <div class="meter"><div class="v" id="m-pkts">—</div><div class="l">packets</div></div>
+      <div class="meter"><div class="v" id="m-gaps">—</div><div class="l">window gaps</div></div>
+      <div class="meter"><div class="v" id="m-crc">—</div><div class="l">CRC errors</div></div>
+      <div class="meter"><div class="v" id="m-sensors">—</div><div class="l">sensors</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="page" id="page-collect">
+  <div class="grid2">
+    <div class="card"><h2>1 · Participant</h2>
+      <label>Existing</label><select id="sel-participant"></select>
+      <div style="margin:10px 0"><button class="act ghost" id="btn-reload-parts">Reload</button></div>
+      <label>Age</label><input id="np-age" type="number" style="width:90px">
+      <label>Gender</label><select id="np-gender"><option value=""></option><option>male</option><option>female</option><option>other</option></select>
+      <label>Language</label><input id="np-language" placeholder="telugu">
+      <label>Dialect</label><input id="np-dialect">
+      <label style="margin-top:8px"><input type="checkbox" id="np-consent"> consent given</label>
+      <button class="act" id="btn-add-participant" style="margin-top:10px">Add Participant</button>
+    </div>
+    <div class="card"><h2>2 · Session</h2>
+      <label>Stage</label><select id="ss-stage"><option value="1">1 · full speech</option><option value="2">2 · partial (neck device)</option><option value="3">3 · non-speaking</option></select>
+      <label>Device mode</label><select id="ss-mode"><option>handheld</option><option>throat</option></select>
+      <button class="act" id="btn-start-session">Start Session</button>
+      <p class="small" id="session-info" style="margin-top:10px">no active session</p>
+      <button class="act ghost" id="btn-end-session" style="margin-top:8px">End Session</button>
+    </div>
+  </div>
+  <div class="card"><h2>3 · Record</h2>
+    <div class="row" style="align-items:end">
+      <div><label>Prompt</label><select id="sel-prompt"></select></div>
+      <div><label>New prompt</label><input id="np-prompt" placeholder="say: hello"></div>
+      <div><label>Duration (s)</label><input id="rec-dur" type="number" value="3" min="1" max="30" style="width:80px"></div>
+      <div style="flex:0"><button class="act rec" id="btn-record">● Record</button></div>
+      <div style="flex:0"><button class="act ghost" id="btn-stop">■ Stop</button></div>
+    </div>
+    <p class="small" id="rec-status" style="margin-top:10px">idle</p>
+  </div>
+  <div class="card"><h2>Takes (this session)</h2>
+    <table id="tbl-takes"><thead><tr><th>#</th><th>prompt</th><th>take</th><th>verdict</th><th>reason</th><th>listen</th><th>mark bad</th></tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section class="page" id="page-process">
+  <div class="card"><h2>Embedding / transformation</h2>
+    <div class="row" style="align-items:end">
+      <div><label>Extractor</label><select id="pr-extractor"><option value="dsp_v1">dsp_v1 (13-feature DSP)</option></select></div>
+      <div><label>Scope</label><select id="pr-scope"><option value="">all takes</option></select></div>
+      <div><label><input type="checkbox" id="pr-include-bad"> include bad takes</label></div>
+      <div style="flex:0"><button class="act" id="btn-process">Run processing</button></div>
+    </div>
+    <div class="bar"><div id="pr-bar"></div></div>
+    <p class="small" id="pr-status" style="margin-top:8px">idle</p>
+  </div>
+</section>
+
+<section class="page" id="page-dataset">
+  <div class="card"><h2>Class balance</h2><table id="tbl-counts"><thead><tr><th>label</th><th>points</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div class="card"><h2>Splits (by participant)</h2>
+    <div class="row" style="align-items:end">
+      <div style="flex:0"><button class="act ghost" id="btn-splits">Auto-assign 80/10/10</button></div>
+      <div style="flex:0"><button class="act ghost" id="btn-split-summary">Refresh summary</button></div>
+    </div>
+    <table id="tbl-splits" style="margin-top:10px"><thead><tr><th>split</th><th>participants</th><th>takes</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card"><h2>Export</h2>
+    <button class="act" id="btn-exp-csv">Export CSV</button>
+    <button class="act" id="btn-exp-npz" style="margin-left:8px">Export NPZ</button>
+    <p class="small" style="margin-top:8px">CSV = one row per embedding vector · NPZ = X, y, label_names, splits, meta</p>
+  </div>
+</section>
+
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const api = (path, opts) => fetch('/api' + path, opts && {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(opts)}).then(r => r.json().then(j => r.ok ? j : Promise.reject(j.detail || j)));
+
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); $('page-' + b.dataset.page).classList.add('active');
+  if (b.dataset.page === 'collect') loadCollect();
+  if (b.dataset.page === 'process') loadProcessScope();
+  if (b.dataset.page === 'dataset') loadDataset();
+});
+
+async function loadProcessScope() {
+  const sessions = await api('/sessions');
+  $('pr-scope').innerHTML = '<option value="">all takes</option>' +
+    sessions.map(s => `<option value="${s.id}">session #${s.id} · ${s.participant_code}</option>`).join('');
+}
+
+/* ---------- live ---------- */
+const ws = new WebSocket(`ws://${location.host}/ws/live`);
+function drawWave(canvas, data, color) {
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0b0f18'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!data || !data.length) return;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  const mid = canvas.height / 2, n = data.length;
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * canvas.width, y = mid - data[i] * (mid - 6);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+}
+ws.onmessage = e => {
+  const m = JSON.parse(e.data);
+  const d = m.device || {};
+  $('devdot').classList.toggle('on', !!d.connected);
+  $('devtext').textContent = d.connected ? `device: ${d.addr} · ${d.packets} pkts` : 'device: disconnected';
+  drawWave($('cv-mic'), m.mic, '#5b9dff');
+  drawWave($('cv-piezo'), m.piezo, '#3ddc84');
+  const q = m.quality || {};
+  $('m-verdict').textContent = q.verdict || '—';
+  $('m-verdict').className = 'v ' + (q.verdict || '');
+  $('m-dbfs').textContent = q.dbfs != null ? q.dbfs : '—';
+  $('m-clip').textContent = q.clip_pct != null ? q.clip_pct : '—';
+  $('m-pkts').textContent = d.packets ?? '—';
+  $('m-gaps').textContent = d.window_gaps ?? '—';
+  $('m-crc').textContent = d.crc_errors ?? '—';
+  $('m-sensors').textContent = (d.active_sensors || []).join('+') || '—';
+};
+
+/* ---------- collect ---------- */
+let state = {participants: [], prompts: [], takes: [], session: null};
+async function loadCollect() {
+  state.participants = await api('/participants');
+  state.prompts = await api('/prompts');
+  $('sel-participant').innerHTML = state.participants.map(p => `<option value="${p.id}">${p.code} ${p.language||''}</option>`).join('');
+  $('sel-prompt').innerHTML = state.prompts.map(p => `<option value="${p.id}">${p.text}</option>`).join('');
+  const rec = await api('/record/status');
+  $('btn-record').disabled = rec.recording;
+  $('btn-stop').disabled = !rec.recording;
+  if (rec.recording) $('rec-status').textContent = 'recording…';
+}
+$('btn-reload-parts').onclick = loadCollect;
+$('btn-add-participant').onclick = async () => {
+  try {
+    const p = await api('/participants', {age:+$('np-age').value||null, gender:$('np-gender').value||null,
+      language:$('np-language').value||null, dialect:$('np-dialect').value||null, consent:$('np-consent').checked});
+    await loadCollect(); $('sel-participant').value = p.id;
+  } catch (e) { alert(e); }
+};
+$('btn-start-session').onclick = async () => {
+  const pid = +$('sel-participant').value;
+  if (!pid) return alert('add/select a participant first');
+  state.session = await api('/sessions', {participant_id: pid, stage:+$('ss-stage').value, device_mode:$('ss-mode').value});
+  $('session-info').textContent = `session #${state.session.id} · participant ${state.participants.find(p=>p.id===pid).code} · stage ${state.session.stage} · ${state.session.device_mode}`;
+  $('tbl-takes').querySelector('tbody').innerHTML = '';
+};
+$('btn-end-session').onclick = async () => {
+  if (!state.session) return;
+  await api(`/sessions/${state.session.id}/end`);
+  state.session = null; $('session-info').textContent = 'no active session';
+};
+$('btn-record').onclick = async () => {
+  if (!state.session) return alert('start a session first');
+  const promptSel = +$('sel-prompt').value, newText = $('np-prompt').value.trim();
+  let promptId = promptSel;
+  if (newText) { const p = await api('/prompts', {text:newText}); promptId = p.id; $('np-prompt').value=''; await loadCollect(); }
+  await api('/record/start', {session_id: state.session.id, prompt_id: promptId, duration_s:+$('rec-dur').value||3});
+  $('rec-status').textContent = 'recording…';
+  $('btn-record').disabled = true; $('btn-stop').disabled = false;
+};
+$('btn-stop').onclick = async () => {
+  const res = await api('/record/stop');
+  $('rec-status').textContent = res.ok ? `take #${res.take_id}: ${res.verdict} ${res.reason||''}` : 'idle';
+  $('btn-record').disabled = false; $('btn-stop').disabled = true;
+  refreshTakes();
+};
+async function refreshTakes() {
+  if (!state.session) return;
+  state.takes = await api(`/takes?session_id=${state.session.id}`);
+  $('tbl-takes').querySelector('tbody').innerHTML = state.takes.map(t => `
+    <tr><td>${t.id}</td><td>${t.prompt_text}</td><td>${t.take_number}</td>
+    <td><span class="badge ${t.verdict}">${t.verdict||'—'}</span></td><td class="small">${t.verdict_reason||''}</td>
+    <td><a href="/api/takes/${t.id}/audio.wav">▶ wav</a></td>
+    <td><button class="act ghost" style="padding:3px 10px" onclick="markBad(${t.id})">✗</button></td></tr>`).join('');
+}
+window.markBad = async id => { await api(`/takes/${id}/mark`, {marked_bad:true}); refreshTakes(); };
+setInterval(() => { if (document.querySelector('#page-collect.active')) refreshTakes(); }, 4000);
+
+/* ---------- process ---------- */
+$('btn-process').onclick = async () => {
+  try {
+    await api('/process/start', {extractor:$('pr-extractor').value, include_bad:$('pr-include-bad').checked});
+    pollProcess();
+  } catch (e) { alert(e); }
+};
+function pollProcess() {
+  const t = setInterval(async () => {
+    const s = await api('/process/status');
+    $('pr-bar').style.width = s.total ? (s.done / s.total * 100) + '%' : '0%';
+    $('pr-status').textContent = s.running ? `processing ${s.current}` : (s.error ? `error: ${s.error}` : (s.last_result || 'idle'));
+    if (!s.running) clearInterval(t);
+  }, 800);
+}
+
+/* ---------- dataset ---------- */
+async function loadDataset() {
+  const c = await api('/dataset/counts');
+  const max = Math.max(1, ...c.labels.map(l => l.n));
+  $('tbl-counts').querySelector('tbody').innerHTML = c.labels.map(l => `
+    <tr><td>${l.label}</td><td>${l.n}</td><td><div class="bar" style="width:200px"><div style="width:${l.n/max*100}%"></div></div></td></tr>`).join('')
+    || '<tr><td colspan="3" class="small">no embeddings yet — run processing first</td></tr>';
+  $('tbl-splits').querySelector('tbody').innerHTML = '<tr><td colspan="3" class="small">loading…</td></tr>';
+  const s = await api('/dataset/splits/summary');
+  $('tbl-splits').querySelector('tbody').innerHTML = s.map(r =>
+    `<tr><td>${r.split}</td><td>${r.participants}</td><td>${r.takes}</td></tr>`).join('');
+}
+$('btn-splits').onclick = async () => { await api('/dataset/splits/auto', {train:.8, val:.1, test:.1}); loadDataset(); };
+$('btn-split-summary').onclick = loadDataset;
+$('btn-exp-csv').onclick = () => location.href = '/api/export/csv';
+$('btn-exp-npz').onclick = () => location.href = '/api/export/npz';
+</script>
+</body>
+</html>
