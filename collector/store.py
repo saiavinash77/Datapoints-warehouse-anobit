@@ -33,8 +33,39 @@ class Store:
         schema = SCHEMA_PATH.read_text()
         c = self.conn()
         c.executescript(schema)
+        try:
+            c.execute("ALTER TABLE sessions ADD COLUMN operator TEXT")
+        except sqlite3.OperationalError:
+            pass
         c.commit()
+        self.seed_default_prompts()
         logger.info("Database ready: %s", self.db_path)
+
+    def seed_default_prompts(self):
+        c = self.conn()
+        defaults = [
+            ('hello', 'word', 'english'), ('yes', 'word', 'english'), ('no', 'word', 'english'),
+            ('thank you', 'word', 'english'), ('help', 'word', 'english'), ('water', 'word', 'english'),
+            ('food', 'word', 'english'), ('doctor', 'word', 'english'), ('pain', 'word', 'english'),
+            ('namaskaram (నమస్కారం)', 'word', 'telugu'), ('avunu (అవును)', 'word', 'telugu'),
+            ('kaadu (కాదు)', 'word', 'telugu'), ('dhanyavadalu (ధన్యవాదాలు)', 'word', 'telugu'),
+            ('neellu (నీళ్లు)', 'word', 'telugu'), ('anna (అన్న)', 'word', 'telugu'),
+            ('aa', 'vowel', 'neutral'), ('ee', 'vowel', 'neutral'), ('oo', 'vowel', 'neutral'),
+            ('aaa (sustained)', 'vowel', 'neutral'), ('eee (sustained)', 'vowel', 'neutral'),
+            ('ooo (sustained)', 'vowel', 'neutral'),
+            ('ka', 'phoneme', 'neutral'), ('ga', 'phoneme', 'neutral'), ('cha', 'phoneme', 'neutral'),
+            ('ja', 'phoneme', 'neutral'), ('ta', 'phoneme', 'neutral'), ('da', 'phoneme', 'neutral'),
+            ('pa', 'phoneme', 'neutral'), ('ba', 'phoneme', 'neutral'), ('ma', 'phoneme', 'neutral'),
+        ]
+        c.executemany("INSERT OR IGNORE INTO prompts (text, category, language) VALUES (?,?,?)", defaults)
+        c.commit()
+        logger.info("Seeded %d default prompts", len(defaults))
+
+    def backup_to(self, dest_path):
+        dest = sqlite3.connect(dest_path)
+        self.conn().backup(dest)
+        dest.close()
+        return dest_path
 
     def query(self, sql, params=()):
         return self.conn().execute(sql, params).fetchall()
@@ -75,13 +106,13 @@ def list_participants(store):
 
 # --- sessions ---
 
-def create_session(store, participant_id, stage=1, device_mode='handheld', mic_gain=None, notes=None):
+def create_session(store, participant_id, stage=1, device_mode='handheld', mic_gain=None, notes=None, operator=None):
     cur = store.execute(
-        "INSERT INTO sessions (participant_id, stage, device_mode, mic_gain, sample_rates_json, started_at, notes) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO sessions (participant_id, stage, device_mode, mic_gain, sample_rates_json, started_at, notes, operator) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (participant_id, stage, device_mode, mic_gain,
          json.dumps({'mic': 16000, 'piezo': 8000, 'pressure': 100, 'airflow': 100}),
-         time.time(), notes))
+         time.time(), notes, operator))
     return get_session(store, cur.lastrowid)
 
 
@@ -159,7 +190,7 @@ def _blob(samples):
 
 
 def get_take(store, take_id):
-    row = store.query("SELECT t.*, p.text AS prompt_text, s.participant_id, pcode.code AS participant_code "
+    row = store.query("SELECT t.*, p.text AS prompt_text, s.participant_id, s.stage, pcode.code AS participant_code "
                       "FROM takes t JOIN prompts p ON p.id=t.prompt_id "
                       "JOIN sessions s ON s.id=t.session_id "
                       "JOIN participants pcode ON pcode.id=s.participant_id WHERE t.id=?", (take_id,))

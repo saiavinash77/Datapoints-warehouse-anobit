@@ -93,7 +93,8 @@
       <button class="act" id="btn-add-participant" style="margin-top:10px">Add Participant</button>
     </div>
     <div class="card"><h2>2 · Session</h2>
-      <label>Stage</label><select id="ss-stage"><option value="1">1 · full speech</option><option value="2">2 · partial (neck device)</option><option value="3">3 · non-speaking</option></select>
+      <label>Operator name / ID</label><input id="ss-operator" placeholder="e.g. Ravi-K">
+      <label style="margin-top:8px">Stage</label><select id="ss-stage"><option value="1">1 · full speech</option><option value="2">2 · partial (neck device)</option><option value="3">3 · non-speaking</option></select>
       <label>Device mode</label><select id="ss-mode"><option>handheld</option><option>throat</option></select>
       <button class="act" id="btn-start-session">Start Session</button>
       <p class="small" id="session-info" style="margin-top:10px">no active session</p>
@@ -137,10 +138,11 @@
     </div>
     <table id="tbl-splits" style="margin-top:10px"><thead><tr><th>split</th><th>participants</th><th>takes</th></tr></thead><tbody></tbody></table>
   </div>
-  <div class="card"><h2>Export</h2>
+  <div class="card"><h2>Export &amp; backup</h2>
     <button class="act" id="btn-exp-csv">Export CSV</button>
-    <button class="act" id="btn-exp-npz" style="margin-left:8px">Export NPZ</button>
-    <p class="small" style="margin-top:8px">CSV = one row per embedding vector · NPZ = X, y, label_names, splits, meta</p>
+    <button class="act ghost" id="btn-exp-npz" style="margin-left:8px">Export NPZ</button>
+    <button class="act ghost" id="btn-backup" style="margin-left:8px">⬇ Backup database</button>
+    <p class="small" style="margin-top:8px">CSV = one row per embedding vector · NPZ = X, y, label_names, splits, meta · Backup = clean SQLite file for the central server</p>
   </div>
 </section>
 
@@ -219,8 +221,8 @@ $('btn-add-participant').onclick = async () => {
 $('btn-start-session').onclick = async () => {
   const pid = +$('sel-participant').value;
   if (!pid) return alert('add/select a participant first');
-  state.session = await api('/sessions', {participant_id: pid, stage:+$('ss-stage').value, device_mode:$('ss-mode').value});
-  $('session-info').textContent = `session #${state.session.id} · participant ${state.participants.find(p=>p.id===pid).code} · stage ${state.session.stage} · ${state.session.device_mode}`;
+  state.session = await api('/sessions', {participant_id: pid, stage:+$('ss-stage').value, device_mode:$('ss-mode').value, operator:$('ss-operator').value||null});
+  $('session-info').textContent = `session #${state.session.id} · participant ${state.participants.find(p=>p.id===pid).code} · stage ${state.session.stage} · ${state.session.device_mode}` + (state.session.operator ? ` · operator ${state.session.operator}` : '');
   $('tbl-takes').querySelector('tbody').innerHTML = '';
 };
 $('btn-end-session').onclick = async () => {
@@ -249,7 +251,7 @@ async function refreshTakes() {
   $('tbl-takes').querySelector('tbody').innerHTML = state.takes.map(t => `
     <tr><td>${t.id}</td><td>${t.prompt_text}</td><td>${t.take_number}</td>
     <td><span class="badge ${t.verdict}">${t.verdict||'—'}</span></td><td class="small">${t.verdict_reason||''}</td>
-    <td><a href="/api/takes/${t.id}/audio.wav">▶ wav</a></td>
+    <td><a href="/api/takes/${t.id}/audio.wav?sensor=mic">▶ mic</a> <a href="/api/takes/${t.id}/audio.wav?sensor=piezo">▶ piezo</a></td>
     <td><button class="act ghost" style="padding:3px 10px" onclick="markBad(${t.id})">✗</button></td></tr>`).join('');
 }
 window.markBad = async id => { await api(`/takes/${id}/mark`, {marked_bad:true}); refreshTakes(); };
@@ -287,6 +289,7 @@ $('btn-splits').onclick = async () => { await api('/dataset/splits/auto', {train
 $('btn-split-summary').onclick = loadDataset;
 $('btn-exp-csv').onclick = () => location.href = '/api/export/csv';
 $('btn-exp-npz').onclick = () => location.href = '/api/export/npz';
+$('btn-backup').onclick = () => location.href = '/api/backup';
 </script>
 </body>
 </html>

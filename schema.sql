@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     participant_id INTEGER NOT NULL REFERENCES participants(id),
     stage INTEGER NOT NULL DEFAULT 1,
     device_mode TEXT NOT NULL DEFAULT 'handheld',
+    operator TEXT,
     mic_gain REAL,
     sample_rates_json TEXT,
     started_at REAL NOT NULL,

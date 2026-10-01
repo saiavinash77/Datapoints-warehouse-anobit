@@ -41,6 +41,7 @@ class SessionIn(BaseModel):
     participant_id: int
     stage: int = 1
     device_mode: str = 'handheld'
+    operator: str | None = None
     mic_gain: float | None = None
     notes: str | None = None
 
@@ -100,7 +101,8 @@ def get_participants():
 @router.post('/sessions')
 def add_session(s: SessionIn):
     return st.create_session(CTX['store'], s.participant_id, stage=s.stage,
-                             device_mode=s.device_mode, mic_gain=s.mic_gain, notes=s.notes)
+                             device_mode=s.device_mode, mic_gain=s.mic_gain, notes=s.notes,
+                             operator=s.operator)
 
 
 @router.get('/sessions')
@@ -176,20 +178,36 @@ def take_waveform(take_id: int):
 
 
 @router.get('/takes/{take_id}/audio.wav')
-def take_audio(take_id: int):
+def take_audio(take_id: int, sensor: str = 'mic'):
+    sensor_col = {'mic': 'mic_blob', 'piezo': 'piezo_blob'}.get(sensor)
+    if sensor_col is None:
+        raise HTTPException(400, 'sensor must be mic or piezo')
+    rate = 16000 if sensor == 'mic' else 8000
     wins = st.take_windows(CTX['store'], take_id)
-    mic_parts = [st.unblob(w['mic_blob']) for w in wins if w['mic_blob'] is not None]
-    if not mic_parts:
-        raise HTTPException(404, 'no_mic_data')
-    samples = [s for part in mic_parts for s in part]
+    parts = [st.unblob(w[sensor_col]) for w in wins if w[sensor_col] is not None]
+    if not parts:
+        raise HTTPException(404, f'no_{sensor}_data')
+    samples = [s for part in parts for s in part]
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as w:
         w.setnchannels(1)
         w.setsampwidth(2)
-        w.setframerate(16000)
+        w.setframerate(rate)
         w.writeframes(struct.pack(f'<{len(samples)}h', *samples))
     return Response(content=buf.getvalue(), media_type='audio/wav',
-                    headers={'Content-Disposition': f'attachment; filename=take_{take_id}.wav'})
+                    headers={'Content-Disposition': f'attachment; filename=take_{take_id}_{sensor}.wav'})
+
+
+@router.get('/backup')
+def backup_db():
+    import time as _t
+    from pathlib import Path as _P
+    backup_dir = _P(__file__).resolve().parent.parent / 'backups'
+    backup_dir.mkdir(exist_ok=True)
+    dest = backup_dir / f'avc_collector_backup_{_t.strftime("%Y%m%d_%H%M%S")}.db'
+    CTX['store'].backup_to(str(dest))
+    return Response(content=dest.read_bytes(), media_type='application/octet-stream',
+                    headers={'Content-Disposition': f'attachment; filename={dest.name}'})
 
 
 # --- processing (embeddings) ---
@@ -260,12 +278,13 @@ class ProcessManager:
                        'pressure': st.unblob(w['pressure_blob']), 'airflow': st.unblob(w['airflow_blob'])}
             vec = ext.extract(samples)
             st.insert_embedding(store, take_id, w['id'], extractor, EXTRACTOR_VERSION, vec,
-                                take['prompt_text'], take['participant_id'], 1,
+                                take['prompt_text'], take['participant_id'], take['stage'],
                                 w['quality_score'], is_bad)
         pooled = extract_take_features(wins, st.unblob)
+        pooled_score = 1.0 if take['verdict'] == 'good' else 0.5
         st.insert_embedding(store, take_id, None, extractor, EXTRACTOR_VERSION, list(pooled),
-                            take['prompt_text'], take['participant_id'], 1,
-                            take['verdict'] and 1.0 if take['verdict'] == 'good' else 0.5, is_bad)
+                            take['prompt_text'], take['participant_id'], take['stage'],
+                            pooled_score, is_bad)
 
 
 @router.post('/process/start')
