@@ -1,48 +1,97 @@
 #!/usr/bin/env python3
-"""SQLite storage layer for the dataset (participants, sessions, prompts, takes, windows, embeddings)."""
+"""Storage layer for the dataset (participants, sessions, prompts, takes, windows, embeddings).
+
+Dual backend: PostgreSQL (Supabase) when DATABASE_URL is set, SQLite otherwise.
+Same table/column names in both; raw samples stored as BYTEA/BLOB int16 little-endian.
+"""
 
 import json
 import logging
+import os
 import sqlite3
+import struct
 import threading
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / 'schema.sql'
+SCHEMA_SQLITE = Path(__file__).resolve().parent.parent / 'schema.sql'
+SCHEMA_PG = Path(__file__).resolve().parent.parent / 'schema_postgres.sql'
 DEFAULT_DB = Path(__file__).resolve().parent.parent / 'avc_collector.db'
 
 
 class Store:
     def __init__(self, db_path=DEFAULT_DB):
         self.db_path = str(db_path)
+        self.pg = bool(os.environ.get('DATABASE_URL'))
         self._local = threading.local()
         self.init_schema()
 
-    def conn(self) -> sqlite3.Connection:
+    def conn(self):
         c = getattr(self._local, 'conn', None)
         if c is None:
-            c = sqlite3.connect(self.db_path, timeout=10)
-            c.row_factory = sqlite3.Row
-            c.execute('PRAGMA foreign_keys = ON')
+            if self.pg:
+                import psycopg2
+                import psycopg2.extras
+                c = psycopg2.connect(os.environ['DATABASE_URL'])
+                c.autocommit = False
+                self._local.cursor_factory = psycopg2.extras.RealDictCursor
+            else:
+                c = sqlite3.connect(self.db_path, timeout=10)
+                c.row_factory = sqlite3.Row
+                c.execute('PRAGMA foreign_keys = ON')
             self._local.conn = c
         return c
 
+    def _sql(self, sql: str) -> str:
+        return sql.replace('?', '%s') if self.pg else sql
+
+    def query(self, sql, params=()):
+        if self.pg:
+            with self.conn().cursor(cursor_factory=self._local.cursor_factory) as cur:
+                cur.execute(self._sql(sql), params)
+                return cur.fetchall()
+        return self.conn().execute(sql, params).fetchall()
+
+    def execute(self, sql, params=()):
+        if self.pg:
+            cur = self.conn().cursor()
+            cur.execute(self._sql(sql), params)
+            self.conn().commit()
+            return cur
+        cur = self.conn().execute(sql, params)
+        self.conn().commit()
+        return cur
+
+    def insert_id(self, sql, params=()):
+        if self.pg:
+            cur = self.execute(sql + ' RETURNING id', params)
+            return cur.fetchone()['id']
+        return self.execute(sql, params).lastrowid
+
     def init_schema(self):
-        schema = SCHEMA_PATH.read_text()
-        c = self.conn()
-        c.executescript(schema)
-        try:
-            c.execute("ALTER TABLE sessions ADD COLUMN operator TEXT")
-        except sqlite3.OperationalError:
-            pass
-        c.commit()
+        schema_path = SCHEMA_PG if self.pg else SCHEMA_SQLITE
+        schema = schema_path.read_text(encoding='utf-8')
+        if self.pg:
+            for stmt in [s.strip() for s in schema.split(';') if s.strip() and not s.strip().startswith('--')]:
+                try:
+                    self.execute(stmt)
+                except Exception:
+                    logger.exception("Schema statement failed (may already exist)")
+        else:
+            c = self.conn()
+            c.executescript(schema)
+            for col in ('operator', 'site_id'):
+                try:
+                    c.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass
+            c.commit()
         self.seed_default_prompts()
-        logger.info("Database ready: %s", self.db_path)
+        logger.info("Database ready (%s)", 'postgres/supabase' if self.pg else self.db_path)
 
     def seed_default_prompts(self):
-        c = self.conn()
         defaults = [
             ('hello', 'word', 'english'), ('yes', 'word', 'english'), ('no', 'word', 'english'),
             ('thank you', 'word', 'english'), ('help', 'word', 'english'), ('water', 'word', 'english'),
@@ -57,23 +106,44 @@ class Store:
             ('ja', 'phoneme', 'neutral'), ('ta', 'phoneme', 'neutral'), ('da', 'phoneme', 'neutral'),
             ('pa', 'phoneme', 'neutral'), ('ba', 'phoneme', 'neutral'), ('ma', 'phoneme', 'neutral'),
         ]
-        c.executemany("INSERT OR IGNORE INTO prompts (text, category, language) VALUES (?,?,?)", defaults)
-        c.commit()
-        logger.info("Seeded %d default prompts", len(defaults))
+        if self.pg:
+            self.execute(
+                "INSERT INTO prompts (text, category, language) SELECT unnest(%s), unnest(%s), unnest(%s) "
+                "ON CONFLICT (text) DO NOTHING",
+                ([d[0] for d in defaults], [d[1] for d in defaults], [d[2] for d in defaults]))
+        else:
+            self.conn().executemany(
+                "INSERT OR IGNORE INTO prompts (text, category, language) VALUES (?,?,?)", defaults)
+            self.conn().commit()
+        logger.info("Default prompts ensured (%d)", len(defaults))
+
+    def backup_bytes(self) -> bytes:
+        """Clean backup of the whole database as bytes (SQLite file or JSON dump)."""
+        if not self.pg:
+            import io
+            buf = io.BytesIO()
+            dest = sqlite3.connect(buf)
+            self.conn().backup(dest)
+            dest.close()
+            return buf.getvalue()
+        tables = ('participants', 'sessions', 'prompts', 'takes', 'windows', 'embeddings')
+        dump = {}
+        for t in tables:
+            rows = self.query(f"SELECT * FROM {t}")
+            dump[t] = []
+            for r in rows:
+                d = dict(r)
+                for k, v in list(d.items()):
+                    if isinstance(v, (bytes, memoryview)):
+                        d[k] = {'blob_b64': __import__('base64').b64encode(bytes(v)).decode()}
+                dump[t].append(d)
+        return json.dumps(dump, ensure_ascii=False, default=str).encode()
 
     def backup_to(self, dest_path):
         dest = sqlite3.connect(dest_path)
         self.conn().backup(dest)
         dest.close()
         return dest_path
-
-    def query(self, sql, params=()):
-        return self.conn().execute(sql, params).fetchall()
-
-    def execute(self, sql, params=()):
-        cur = self.conn().execute(sql, params)
-        self.conn().commit()
-        return cur
 
 
 # --- participants ---
@@ -88,11 +158,11 @@ def next_participant_code(store) -> str:
 
 def create_participant(store, age=None, gender=None, language=None, dialect=None, notes=None, consent=False, code=None):
     code = code or next_participant_code(store)
-    cur = store.execute(
+    pid = store.insert_id(
         "INSERT INTO participants (code, age, gender, language, dialect, notes, consent_given, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
         (code, age, gender, language, dialect, notes, int(consent), time.time()))
-    return get_participant(store, cur.lastrowid)
+    return get_participant(store, pid)
 
 
 def get_participant(store, pid):
@@ -106,14 +176,15 @@ def list_participants(store):
 
 # --- sessions ---
 
-def create_session(store, participant_id, stage=1, device_mode='handheld', mic_gain=None, notes=None, operator=None):
-    cur = store.execute(
-        "INSERT INTO sessions (participant_id, stage, device_mode, mic_gain, sample_rates_json, started_at, notes, operator) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+def create_session(store, participant_id, stage=1, device_mode='handheld', mic_gain=None,
+                   notes=None, operator=None, site_id=None):
+    sid = store.insert_id(
+        "INSERT INTO sessions (participant_id, stage, device_mode, mic_gain, sample_rates_json, "
+        "started_at, notes, operator, site_id) VALUES (?,?,?,?,?,?,?,?,?)",
         (participant_id, stage, device_mode, mic_gain,
          json.dumps({'mic': 16000, 'piezo': 8000, 'pressure': 100, 'airflow': 100}),
-         time.time(), notes, operator))
-    return get_session(store, cur.lastrowid)
+         time.time(), notes, operator, site_id))
+    return get_session(store, sid)
 
 
 def get_session(store, sid):
@@ -137,9 +208,9 @@ def ensure_prompt(store, text, category='word', language=None):
     row = store.query("SELECT * FROM prompts WHERE text=?", (text,))
     if row:
         return dict(row[0])
-    cur = store.execute("INSERT INTO prompts (text, category, language) VALUES (?,?,?)",
-                        (text, category, language))
-    return dict(store.query("SELECT * FROM prompts WHERE id=?", (cur.lastrowid,))[0])
+    pid = store.insert_id("INSERT INTO prompts (text, category, language) VALUES (?,?,?)",
+                          (text, category, language))
+    return dict(store.query("SELECT * FROM prompts WHERE id=?", (pid,))[0])
 
 
 def list_prompts(store):
@@ -152,9 +223,8 @@ def create_take(store, session_id, prompt_id):
     row = store.query("SELECT COALESCE(MAX(take_number),0)+1 AS n FROM takes WHERE session_id=? AND prompt_id=?",
                       (session_id, prompt_id))
     n = row[0]['n']
-    cur = store.execute("INSERT INTO takes (session_id, prompt_id, take_number, started_at) VALUES (?,?,?,?)",
-                        (session_id, prompt_id, n, time.time()))
-    return cur.lastrowid
+    return store.insert_id("INSERT INTO takes (session_id, prompt_id, take_number, started_at) VALUES (?,?,?,?)",
+                           (session_id, prompt_id, n, time.time()))
 
 
 def finish_take(store, take_id, duration_s, verdict, verdict_reason):
@@ -185,7 +255,6 @@ def insert_window(store, take_id, seq, t_start_ms, samples, features, quality, p
 def _blob(samples):
     if not samples:
         return None
-    import struct
     return struct.pack(f'<{len(samples)}h', *samples)
 
 
@@ -217,21 +286,29 @@ def take_windows(store, take_id):
 def unblob(blob):
     if blob is None:
         return []
-    import struct
-    return list(struct.unpack(f'<{len(blob)//2}h', blob))
+    data = bytes(blob)
+    return list(struct.unpack(f'<{len(data)//2}h', data))
 
 
 # --- embeddings ---
 
 def insert_embedding(store, take_id, window_id, extractor_name, extractor_version, vector, label,
                      participant_id, stage, quality_score, is_bad):
-    import struct
+    blob = struct.pack(f'<{len(vector)}f', *vector)
+    if store.pg and len(vector) == 13:
+        vec_literal = '[' + ','.join(str(float(v)) for v in vector) + ']'
+        store.execute(
+            "INSERT INTO embeddings (take_id, window_id, extractor_name, extractor_version, dim, vector, vec, "
+            "label, participant_id, stage, quality_score, is_bad, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (take_id, window_id, extractor_name, extractor_version, len(vector), blob, vec_literal,
+             label, participant_id, stage, quality_score, int(is_bad), time.time()))
+        return
     store.execute(
         "INSERT INTO embeddings (take_id, window_id, extractor_name, extractor_version, dim, vector, label, "
         "participant_id, stage, quality_score, is_bad, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (take_id, window_id, extractor_name, extractor_version, len(vector),
-         struct.pack(f'<{len(vector)}f', *vector), label, participant_id, stage,
-         quality_score, int(is_bad), time.time()))
+        (take_id, window_id, extractor_name, extractor_version, len(vector), blob, label,
+         participant_id, stage, quality_score, int(is_bad), time.time()))
 
 
 def list_embeddings(store, extractor=None, stage=None):
@@ -251,7 +328,6 @@ def list_embeddings(store, extractor=None, stage=None):
 
 def embedding_vectors(store, extractor=None):
     """Return list of dicts with parsed float vectors for export."""
-    import struct
     sql = ("SELECT e.id, e.take_id, e.window_id, e.extractor_name, e.extractor_version, e.dim, e.vector, "
            "e.label, e.participant_id, e.stage, e.quality_score, e.is_bad, t.split "
            "FROM embeddings e JOIN takes t ON t.id=e.take_id")
@@ -262,7 +338,7 @@ def embedding_vectors(store, extractor=None):
     out = []
     for r in store.query(sql + " ORDER BY e.id", params):
         d = dict(r)
-        d['vector'] = list(struct.unpack(f'<{d["dim"]}f', d.pop('vector')))
+        d['vector'] = list(struct.unpack(f'<{d["dim"]}f', bytes(d.pop('vector'))))
         out.append(d)
     return out
 

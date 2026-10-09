@@ -3,3 +3,4 @@ uvicorn>=0.29,<1.0
 pydantic>=2.6,<3.0
 numpy>=1.26,<2.0
 scipy>=1.11,<2.0
+psycopg2-binary>=2.9,<3.0

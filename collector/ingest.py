@@ -88,7 +88,16 @@ class IngestService:
         return items[-n:] if n else items
 
     def start(self):
-        self._thread = threading.Thread(target=self._run, name='ingest', daemon=True)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.socket_rcvbuf)
+        except OSError as e:
+            logger.warning("Could not raise SO_RCVBUF: %s", e)
+        sock.bind(('0.0.0.0', self.port))
+        sock.settimeout(1.0)
+        actual_buf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        logger.info("UDP receive buffer: %d bytes", actual_buf)
+        self._thread = threading.Thread(target=self._run, args=(sock,), name='ingest', daemon=True)
         self._thread.start()
         logger.info("Ingest service listening on UDP port %d", self.port)
 
@@ -97,16 +106,7 @@ class IngestService:
         if self._thread:
             self._thread.join(timeout=3)
 
-    def _run(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.socket_rcvbuf)
-        except OSError as e:
-            logger.warning("Could not raise SO_RCVBUF: %s", e)
-        actual_buf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        logger.info("UDP receive buffer: %d bytes", actual_buf)
-        sock.bind(('0.0.0.0', self.port))
-        sock.settimeout(1.0)
+    def _run(self, sock):
         buf = bytearray(self.recv_buffer)
         while not self._stop.is_set():
             try:
@@ -118,6 +118,10 @@ class IngestService:
                 continue
             data = bytes(buf[:n])
             self._handle(data, addr)
+
+    def process_bytes(self, data: bytes, addr=('http-device', 0)) -> dict | None:
+        """Process one packet received via HTTP POST (cloud mode). Returns parse status."""
+        return self._handle(data, addr)
 
     def _handle(self, data, addr):
         now = time.time()
@@ -136,7 +140,7 @@ class IngestService:
             with d.lock:
                 d.parse_errors += 1
             logger.debug("Unparseable packet from %s", addr)
-            return
+            return {'ok': False, 'error': 'unparseable'}
         if parsed.get('error'):
             with d.lock:
                 if parsed['error'] == 'crc_mismatch':
@@ -144,7 +148,7 @@ class IngestService:
                 else:
                     d.parse_errors += 1
             logger.debug("Packet error %s from %s", parsed['error'], addr)
-            return
+            return {'ok': False, 'error': parsed['error']}
 
         seq = parsed['window_count']
         with d.lock:
@@ -165,3 +169,4 @@ class IngestService:
                 cb(win)
             except Exception:
                 logger.exception("Subscriber failed")
+        return {'ok': True, 'seq': seq, 'sensors': list(parsed['samples'].keys())}

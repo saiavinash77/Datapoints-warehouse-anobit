@@ -32,7 +32,10 @@ app.include_router(api.router)
 
 @app.on_event('startup')
 def startup():
-    ingest.start()
+    try:
+        ingest.start()
+    except OSError as e:
+        logger.warning("UDP ingest unavailable (%s) — HTTP ingest only (cloud mode)", e)
 
 
 @app.on_event('shutdown')

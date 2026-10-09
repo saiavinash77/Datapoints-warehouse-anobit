@@ -93,7 +93,8 @@
       <button class="act" id="btn-add-participant" style="margin-top:10px">Add Participant</button>
     </div>
     <div class="card"><h2>2 · Session</h2>
-      <label>Operator name / ID</label><input id="ss-operator" placeholder="e.g. Ravi-K">
+      <label>Site / hospital ID</label><input id="ss-site" placeholder="e.g. hospital-1">
+      <label style="margin-top:8px">Operator name / ID</label><input id="ss-operator" placeholder="e.g. Ravi-K">
       <label style="margin-top:8px">Stage</label><select id="ss-stage"><option value="1">1 · full speech</option><option value="2">2 · partial (neck device)</option><option value="3">3 · non-speaking</option></select>
       <label>Device mode</label><select id="ss-mode"><option>handheld</option><option>throat</option></select>
       <button class="act" id="btn-start-session">Start Session</button>
@@ -141,7 +142,8 @@
   <div class="card"><h2>Export &amp; backup</h2>
     <button class="act" id="btn-exp-csv">Export CSV</button>
     <button class="act ghost" id="btn-exp-npz" style="margin-left:8px">Export NPZ</button>
-    <button class="act ghost" id="btn-backup" style="margin-left:8px">⬇ Backup database</button>
+    <button class="act ghost" id="btn-backup" style="margin-left:8px">⬇ Backup download</button>
+    <button class="act" id="btn-cloud-upload" style="margin-left:8px">☁ Upload to cloud</button>
     <p class="small" style="margin-top:8px">CSV = one row per embedding vector · NPZ = X, y, label_names, splits, meta · Backup = clean SQLite file for the central server</p>
   </div>
 </section>
@@ -221,7 +223,7 @@ $('btn-add-participant').onclick = async () => {
 $('btn-start-session').onclick = async () => {
   const pid = +$('sel-participant').value;
   if (!pid) return alert('add/select a participant first');
-  state.session = await api('/sessions', {participant_id: pid, stage:+$('ss-stage').value, device_mode:$('ss-mode').value, operator:$('ss-operator').value||null});
+  state.session = await api('/sessions', {participant_id: pid, stage:+$('ss-stage').value, device_mode:$('ss-mode').value, site_id:$('ss-site').value||null, operator:$('ss-operator').value||null});
   $('session-info').textContent = `session #${state.session.id} · participant ${state.participants.find(p=>p.id===pid).code} · stage ${state.session.stage} · ${state.session.device_mode}` + (state.session.operator ? ` · operator ${state.session.operator}` : '');
   $('tbl-takes').querySelector('tbody').innerHTML = '';
 };
@@ -290,6 +292,14 @@ $('btn-split-summary').onclick = loadDataset;
 $('btn-exp-csv').onclick = () => location.href = '/api/export/csv';
 $('btn-exp-npz').onclick = () => location.href = '/api/export/npz';
 $('btn-backup').onclick = () => location.href = '/api/backup';
+$('btn-cloud-upload').onclick = async () => {
+  $('btn-cloud-upload').disabled = true;
+  try {
+    const r = await api('/backup/upload');
+    alert(`Uploaded ${r.file} (${(r.bytes/1024/1024).toFixed(1)} MB) to Supabase bucket "${r.bucket}"`);
+  } catch (e) { alert('Upload failed: ' + e); }
+  $('btn-cloud-upload').disabled = false;
+};
 </script>
 </body>
 </html>

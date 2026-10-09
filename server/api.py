@@ -4,6 +4,7 @@
 import csv
 import hashlib
 import io
+import json
 import logging
 import struct
 import threading
@@ -12,7 +13,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -41,6 +42,7 @@ class SessionIn(BaseModel):
     participant_id: int
     stage: int = 1
     device_mode: str = 'handheld'
+    site_id: str | None = None
     operator: str | None = None
     mic_gain: float | None = None
     notes: str | None = None
@@ -102,7 +104,7 @@ def get_participants():
 def add_session(s: SessionIn):
     return st.create_session(CTX['store'], s.participant_id, stage=s.stage,
                              device_mode=s.device_mode, mic_gain=s.mic_gain, notes=s.notes,
-                             operator=s.operator)
+                             operator=s.operator, site_id=s.site_id)
 
 
 @router.get('/sessions')
@@ -198,16 +200,67 @@ def take_audio(take_id: int, sensor: str = 'mic'):
                     headers={'Content-Disposition': f'attachment; filename=take_{take_id}_{sensor}.wav'})
 
 
+@router.post('/ingest')
+async def ingest_packet(request: Request):
+    """Device HTTP ingest (cloud mode): POST the raw AVC packet bytes."""
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, 'empty_body')
+    result = CTX['ingest'].process_bytes(body)
+    if result is None or not result.get('ok'):
+        raise HTTPException(400, (result or {}).get('error', 'unparseable'))
+    return result
+
+
 @router.get('/backup')
 def backup_db():
     import time as _t
     from pathlib import Path as _P
     backup_dir = _P(__file__).resolve().parent.parent / 'backups'
     backup_dir.mkdir(exist_ok=True)
-    dest = backup_dir / f'avc_collector_backup_{_t.strftime("%Y%m%d_%H%M%S")}.db'
-    CTX['store'].backup_to(str(dest))
+    ext = 'json' if CTX['store'].pg else 'db'
+    dest = backup_dir / f'avc_collector_backup_{_t.strftime("%Y%m%d_%H%M%S")}.{ext}'
+    dest.write_bytes(CTX['store'].backup_bytes())
     return Response(content=dest.read_bytes(), media_type='application/octet-stream',
                     headers={'Content-Disposition': f'attachment; filename={dest.name}'})
+
+
+@router.post('/backup/upload')
+def backup_upload():
+    """Create a backup and upload it to Supabase Storage (cloud dataset hub)."""
+    import os
+    import time as _t
+    import urllib.request
+    import urllib.error
+
+    supabase_url = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    service_key = os.environ.get('SUPABASE_SERVICE_KEY', '')
+    bucket = os.environ.get('SUPABASE_BACKUP_BUCKET', 'avc-backups')
+    if not supabase_url or not service_key:
+        raise HTTPException(400, 'supabase_not_configured: set SUPABASE_URL and SUPABASE_SERVICE_KEY')
+
+    ext = 'json' if CTX['store'].pg else 'db'
+    name = f"backup_{_t.strftime('%Y%m%d_%H%M%S')}.{ext}"
+    data = CTX['store'].backup_bytes()
+
+    def _storage_req(method, path, payload=None, headers=None):
+        req = urllib.request.Request(f'{supabase_url}/storage/v1{path}', data=payload, method=method,
+                                     headers={'Authorization': f'Bearer {service_key}', **(headers or {})})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.status, resp.read()
+
+    try:
+        status, _ = _storage_req('POST', f'/object/{bucket}/{name}', data,
+                                 {'Content-Type': 'application/octet-stream', 'x-upsert': 'true'})
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and 'Bucket' in e.read().decode(errors='ignore'):
+            _storage_req('POST', '/bucket', json.dumps({'name': bucket, 'public': False}).encode(),
+                         {'Content-Type': 'application/json'})
+            _storage_req('POST', f'/object/{bucket}/{name}', data,
+                         {'Content-Type': 'application/octet-stream', 'x-upsert': 'true'})
+        else:
+            raise HTTPException(502, f'supabase_storage_error: {e.code}')
+    return {'ok': True, 'file': name, 'bytes': len(data), 'bucket': bucket}
 
 
 # --- processing (embeddings) ---
