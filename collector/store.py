@@ -25,6 +25,7 @@ class Store:
     def __init__(self, db_path=DEFAULT_DB):
         self.db_path = str(db_path)
         self.pg = bool(os.environ.get('DATABASE_URL'))
+        self.pgvector = False
         self._local = threading.local()
         self.init_schema()
 
@@ -74,11 +75,28 @@ class Store:
         schema_path = SCHEMA_PG if self.pg else SCHEMA_SQLITE
         schema = schema_path.read_text(encoding='utf-8')
         if self.pg:
+            c = self.conn()
+            original_autocommit = c.autocommit
+            c.autocommit = True
+            try:
+                cur = c.cursor()
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.close()
+                self.pgvector = True
+            except Exception:
+                logger.warning("pgvector extension not available; embeddings will be stored as BYTEA")
+            if not self.pgvector:
+                schema = schema.replace('CREATE EXTENSION IF NOT EXISTS vector;', '')
+                schema = schema.replace('    vec vector(13),', '')
             for stmt in [s.strip() for s in schema.split(';') if s.strip() and not s.strip().startswith('--')]:
                 try:
-                    self.execute(stmt)
+                    cur = c.cursor()
+                    cur.execute(stmt)
+                    cur.close()
                 except Exception:
                     logger.exception("Schema statement failed (may already exist)")
+            c.autocommit = original_autocommit
+            self.seed_default_prompts()
         else:
             c = self.conn()
             c.executescript(schema)
@@ -88,7 +106,7 @@ class Store:
                 except sqlite3.OperationalError:
                     pass
             c.commit()
-        self.seed_default_prompts()
+            self.seed_default_prompts()
         logger.info("Database ready (%s)", 'postgres/supabase' if self.pg else self.db_path)
 
     def seed_default_prompts(self):
@@ -295,7 +313,7 @@ def unblob(blob):
 def insert_embedding(store, take_id, window_id, extractor_name, extractor_version, vector, label,
                      participant_id, stage, quality_score, is_bad):
     blob = struct.pack(f'<{len(vector)}f', *vector)
-    if store.pg and len(vector) == 13:
+    if store.pg and store.pgvector and len(vector) == 13:
         vec_literal = '[' + ','.join(str(float(v)) for v in vector) + ']'
         store.execute(
             "INSERT INTO embeddings (take_id, window_id, extractor_name, extractor_version, dim, vector, vec, "
